@@ -1,4 +1,4 @@
-%%writefile appimport streamlit as st
+import streamlit as st
 import streamlit as st
 import yfinance as ticker_data
 import pandas as pd
