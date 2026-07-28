@@ -27,7 +27,6 @@ results here due to data mapping differences on Yahoo Finance.
 * **Investment Decision:** These results are absolutely not investment advice, 
 binding statements, or religious fatwas.
 """)
-%%writefile -a app.py
 
 @st.cache_data(ttl=1800)
 def fetch_financial_data(ticker_symbol):
