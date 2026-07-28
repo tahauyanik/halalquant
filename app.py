@@ -191,7 +191,7 @@ if st.button("Launch Comprehensive Quarterly Analysis"):
                 "_n": nakit_gecti if nakit_veri_var else None, 
                 "_a": alacak_gecti if alacak_veri_var else None
             })
-%%writefile -a app.py
+
         
         if toplu_sonuclar:
             df_gosterim = pd.DataFrame(toplu_sonuclar).drop(
