@@ -26,6 +26,7 @@ results here due to data mapping differences on Yahoo Finance.
 * **Investment Decision:** These results are absolutely not investment advice, 
 binding statements, or religious fatwas.
 """)
+
 @st.cache_data(ttl=1800)
 def fetch_financial_data(ticker_symbol):
     try:
@@ -54,102 +55,104 @@ if st.button("Launch Comprehensive Quarterly Analysis"):
         
         for g in kodlar:
             ticker_symbol = f"{g}.IS" if not g.endswith(".IS") else g
-            data_pack = fetch_financial_data(ticker_symbol)
-            
-            if not data_pack:
-                st.warning(f"⚠️ Connection error for {ticker_symbol}. Skipped.")
-                continue
-                
-            bilanco_tablosu = data_pack["balance_sheet"]
-            gelir_tablosu = data_pack["financials"]
-            gecmis_fiyatlar = data_pack["history"]
-            shares_outstanding = data_pack["info"].get('sharesOutstanding')
-            
-            if (bilanco_tablosu.empty or gelir_tablosu.empty or 
-                gecmis_fiyatlar.empty or not shares_outstanding):
-                st.warning(f"⚠️ {ticker_symbol} data is incomplete. Skipped.")
-                continue
-            
-            py_f = float(gecmis_fiyatlar['Close'].mean() * shares_outstanding)
-            # 1. DEBT FILTER
-            borc_orani, borc_gecti, borc_veri_var = None, False, False
-            if 'Total Debt' in bilanco_tablosu.index:
-                ham_borc = bilanco_tablosu.loc['Total Debt']
-                if hasattr(ham_borc, 'empty') and not ham_borc.empty:
-                    val_borc = ham_borc.values
-                else:
-                    val_borc = ham_borc
-                if not pd.isna(val_borc) and val_borc is not None:
-                    borc_orani = (float(val_borc) / py_f) * 100
-                    borc_veri_var = True
-                    if borc_orani <= 33: borc_gecti = True
+            try:
+                data_pack = fetch_financial_data(ticker_symbol)
 
-            # 2. INTEREST REVENUE FILTER
-            total_revenue = None
-            for row in ['Total Revenue', 'Operating Revenue']:
-                if row in gelir_tablosu.index:
-                    ham_rev = gelir_tablosu.loc[row]
-                    val_rev = ham_rev.values if hasattr(ham_rev, 'empty') else ham_rev
-                    if not pd.isna(val_rev) and float(val_rev) > 0:
-                        total_revenue = float(val_rev)
-                        break
-            
-            faiz_geliri = 0
-            faiz_satiri_bulundu = False
-            for row in ['Interest Income', 'Non Operating Interest Income', 'Interest Income Non Operating']:
-                if row in gelir_tablosu.index:
-                    ham_faiz = gelir_tablosu.loc[row]
-                    deger = ham_faiz.values if hasattr(ham_faiz, 'empty') else ham_faiz
-                    if not pd.isna(deger) and deger is not None:
-                        faiz_geliri += float(deger)
-                        faiz_satiri_bulundu = True
-            
-            faiz_orani, faiz_gecti, faiz_veri_var = None, False, False
-            if total_revenue and faiz_satiri_bulundu:
-                faiz_orani = (faiz_geliri / total_revenue) * 100
-                faiz_veri_var = True
-                if faiz_orani <= 5: faiz_gecti = True
+                if not data_pack:
+                    st.warning(f"⚠️ Connection error for {ticker_symbol}. Skipped.")
+                    continue
 
-            # 3. CASH & LIQUIDITY FILTER
-            nakit_orani, nakit_gecti, nakit_veri_var = None, False, False
-            for row in ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']:
-                if row in bilanco_tablosu.index:
-                    ham_nakit = bilanco_tablosu.loc[row]
-                    val_n = ham_nakit.values if hasattr(ham_nakit, 'empty') else ham_nakit
-                    if not pd.isna(val_n) and val_n is not None:
-                        nakit_orani = (float(val_n) / py_f) * 100
-                        nakit_veri_var = True
-                        if nakit_orani <= 33: nakit_gecti = True
-                        break
+                bilanco_tablosu = data_pack["balance_sheet"]
+                gelir_tablosu = data_pack["financials"]
+                gecmis_fiyatlar = data_pack["history"]
+                shares_outstanding = data_pack["info"].get('sharesOutstanding')
 
-            # 4. RECEIVABLES FILTER
-            alacak_orani, alacak_gecti, alacak_veri_var = None, False, False
-            for row in ['Receivables', 'Accounts Receivable', 'Gross Accounts Receivable']:
-                if row in bilanco_tablosu.index:
-                    ham_alacak = bilanco_tablosu.loc[row]
-                    val_a = ham_alacak.values if hasattr(ham_alacak, 'empty') else ham_alacak
-                    if not pd.isna(val_a) and val_a is not None:
-                        alacak_orani = (float(val_a) / py_f) * 100
-                        alacak_veri_var = True
-                        if alacak_orani <= 33: alacak_gecti = True
-                        break
+                if (bilanco_tablosu.empty or gelir_tablosu.empty or 
+                    gecmis_fiyatlar.empty or not shares_outstanding):
+                    st.warning(f"⚠️ {ticker_symbol} data is incomplete. Skipped.")
+                    continue
 
-            # FINAL DECISION
-            veri_eksik = not (borc_veri_var and faiz_veri_var and nakit_veri_var and alacak_veri_var)
-            if veri_eksik: nihai_sonuc = "INSUFFICIENT DATA"
-            elif borc_gecti and faiz_gecti and nakit_gecti and alacak_gecti: nihai_sonuc = "COMPLIANT"
-            else: nihai_sonuc = "NON-COMPLIANT"
-            
-            toplu_sonuclar.append({
-                "Ticker": g, "Avg Market Cap (1Y)": f"{py_f:,.0f}",
-                "Debt Ratio (%33)": f"%{borc_orani:.2f}" if borc_veri_var else "N/A",
-                "Interest Ratio (%5)": f"%{faiz_orani:.2f}" if faiz_veri_var else "N/A",
-                "Cash Ratio (%33)": f"%{nakit_orani:.2f}" if nakit_veri_var else "N/A",
-                "Receivables Ratio (%33)": f"%{alacak_orani:.2f}" if alacak_veri_var else "N/A",
-                "FINAL STATUS": nihai_sonuc,
-                "_b": borc_gecti if borc_veri_var else None, "_f": faiz_gecti if faiz_veri_var else None,
-                "_n": nakit_gecti if nakit_veri_var else None, "_a": alacak_gecti if alacak_veri_var else None
-            })
+                py_f = float(gecmis_fiyatlar['Close'].mean() * shares_outstanding)
+
+                # 1. DEBT FILTER
+                borc_orani, borc_gecti, borc_veri_var = None, False, False
+                if 'Total Debt' in bilanco_tablosu.index:
+                    ham_borc = bilanco_tablosu.loc['Total Debt']
+                    val_borc = ham_borc.iloc[0] if hasattr(ham_borc, 'iloc') else ham_borc
+                    if not pd.isna(val_borc) and val_borc is not None:
+                        borc_orani = (float(val_borc) / py_f) * 100
+                        borc_veri_var = True
+                        if borc_orani <= 33: borc_gecti = True
+
+                # 2. INTEREST REVENUE FILTER
+                total_revenue = None
+                for row in ['Total Revenue', 'Operating Revenue']:
+                    if row in gelir_tablosu.index:
+                        ham_rev = gelir_tablosu.loc[row]
+                        val_rev = ham_rev.iloc[0] if hasattr(ham_rev, 'iloc') else ham_rev
+                        if not pd.isna(val_rev) and float(val_rev) > 0:
+                            total_revenue = float(val_rev)
+                            break
+
+                faiz_geliri = 0
+                faiz_satiri_bulundu = False
+                for row in ['Interest Income', 'Non Operating Interest Income', 'Interest Income Non Operating']:
+                    if row in gelir_tablosu.index:
+                        ham_faiz = gelir_tablosu.loc[row]
+                        deger = ham_faiz.iloc[0] if hasattr(ham_faiz, 'iloc') else ham_faiz
+                        if not pd.isna(deger) and deger is not None:
+                            faiz_geliri += float(deger)
+                            faiz_satiri_bulundu = True
+
+                faiz_orani, faiz_gecti, faiz_veri_var = None, False, False
+                if total_revenue and faiz_satiri_bulundu:
+                    faiz_orani = (faiz_geliri / total_revenue) * 100
+                    faiz_veri_var = True
+                    if faiz_orani <= 5: faiz_gecti = True
+
+                # 3. CASH & LIQUIDITY FILTER
+                nakit_orani, nakit_gecti, nakit_veri_var = None, False, False
+                for row in ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']:
+                    if row in bilanco_tablosu.index:
+                        ham_nakit = bilanco_tablosu.loc[row]
+                        val_n = ham_nakit.iloc[0] if hasattr(ham_nakit, 'iloc') else ham_nakit
+                        if not pd.isna(val_n) and val_n is not None:
+                            nakit_orani = (float(val_n) / py_f) * 100
+                            nakit_veri_var = True
+                            if nakit_orani <= 33: nakit_gecti = True
+                            break
+
+                # 4. RECEIVABLES FILTER
+                alacak_orani, alacak_gecti, alacak_veri_var = None, False, False
+                for row in ['Receivables', 'Accounts Receivable', 'Gross Accounts Receivable']:
+                    if row in bilanco_tablosu.index:
+                        ham_alacak = bilanco_tablosu.loc[row]
+                        val_a = ham_alacak.iloc[0] if hasattr(ham_alacak, 'iloc') else ham_alacak
+                        if not pd.isna(val_a) and val_a is not None:
+                            alacak_orani = (float(val_a) / py_f) * 100
+                            alacak_veri_var = True
+                            if alacak_orani <= 33: alacak_gecti = True
+                            break
+
+                # FINAL DECISION
+                veri_eksik = not (borc_veri_var and faiz_veri_var and nakit_veri_var and alacak_veri_var)
+                if veri_eksik: nihai_sonuc = "INSUFFICIENT DATA"
+                elif borc_gecti and faiz_gecti and nakit_gecti and alacak_gecti: nihai_sonuc = "COMPLIANT"
+                else: nihai_sonuc = "NON-COMPLIANT"
+
+                toplu_sonuclar.append({
+                    "Ticker": g, "Avg Market Cap (1Y)": f"{py_f:,.0f}",
+                    "Debt Ratio (%33)": f"%{borc_orani:.2f}" if borc_veri_var else "N/A",
+                    "Interest Ratio (%5)": f"%{faiz_orani:.2f}" if faiz_veri_var else "N/A",
+                    "Cash Ratio (%33)": f"%{nakit_orani:.2f}" if nakit_veri_var else "N/A",
+                    "Receivables Ratio (%33)": f"%{alacak_orani:.2f}" if alacak_veri_var else "N/A",
+                    "FINAL STATUS": nihai_sonuc,
+                    "_b": borc_gecti if borc_veri_var else None, "_f": faiz_gecti if faiz_veri_var else None,
+                    "_n": nakit_gecti if nakit_veri_var else None, "_a": alacak_gecti if alacak_veri_var else None
+                })
+            except Exception as e:
+                st.warning(f"⚠️ Unexpected error while screening {g}: {e}")
+
         if toplu_sonuclar:
             df_gosterim = pd.DataFrame(toplu_sonuclar).drop(columns=["_b", "_f", "_n", "_a"])
             st.dataframe(df_gosterim, use_container_width=True)
