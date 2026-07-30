@@ -5,6 +5,8 @@ import io
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
+from screening_logic import screen_company
+
 # --- PAGE CONFIG (neutral, no internal version numbers) ---
 st.set_page_config(
     page_title="HalalQuant | Independent Financial Screening",
@@ -69,6 +71,16 @@ def fetch_financial_data(ticker_symbol):
     except Exception:
         return None
 
+
+def format_ratio(value, passed, threshold_label):
+    """Embed a ✓/✗ symbol alongside the percentage so the pass/fail
+    signal doesn't rely on color alone (colorblind accessibility)."""
+    if value is None:
+        return "– N/A"
+    symbol = "✓" if passed else "✗"
+    return f"{symbol} %{value:.2f}"
+
+
 girdi_liste = st.text_input(
     "BIST Ticker Symbols (Separate with commas):", 
     "BIMAS, ASELS, MGROS, THYAO, HEKTS"
@@ -96,88 +108,35 @@ if st.button("Run Screening"):
                 gecmis_fiyatlar = data_pack["history"]
                 shares_outstanding = data_pack["info"].get('sharesOutstanding')
 
-                if (bilanco_tablosu.empty or gelir_tablosu.empty or 
+                if (bilanco_tablosu.empty or gelir_tablosu.empty or
                     gecmis_fiyatlar.empty or not shares_outstanding):
                     st.warning(f"⚠️ {ticker_symbol} data is incomplete. Skipped.")
                     continue
 
                 py_f = float(gecmis_fiyatlar['Close'].mean() * shares_outstanding)
 
-                # 1. DEBT FILTER
-                borc_orani, borc_gecti, borc_veri_var = None, False, False
-                if 'Total Debt' in bilanco_tablosu.index:
-                    ham_borc = bilanco_tablosu.loc['Total Debt']
-                    val_borc = ham_borc.iloc[0] if hasattr(ham_borc, 'iloc') else ham_borc
-                    if not pd.isna(val_borc) and val_borc is not None:
-                        borc_orani = (float(val_borc) / py_f) * 100
-                        borc_veri_var = True
-                        if borc_orani <= 33: borc_gecti = True
+                # All four ratios + final verdict now live in screening_logic.py,
+                # covered by test_filters.py — see that file before editing the math.
+                result = screen_company(bilanco_tablosu, gelir_tablosu, py_f)
 
-                # 2. INTEREST REVENUE FILTER
-                total_revenue = None
-                for row in ['Total Revenue', 'Operating Revenue']:
-                    if row in gelir_tablosu.index:
-                        ham_rev = gelir_tablosu.loc[row]
-                        val_rev = ham_rev.iloc[0] if hasattr(ham_rev, 'iloc') else ham_rev
-                        if not pd.isna(val_rev) and float(val_rev) > 0:
-                            total_revenue = float(val_rev)
-                            break
-
-                faiz_geliri = 0
-                faiz_satiri_bulundu = False
-                for row in ['Interest Income', 'Non Operating Interest Income', 'Interest Income Non Operating']:
-                    if row in gelir_tablosu.index:
-                        ham_faiz = gelir_tablosu.loc[row]
-                        deger = ham_faiz.iloc[0] if hasattr(ham_faiz, 'iloc') else ham_faiz
-                        if not pd.isna(deger) and deger is not None:
-                            faiz_geliri += float(deger)
-                            faiz_satiri_bulundu = True
-
-                faiz_orani, faiz_gecti, faiz_veri_var = None, False, False
-                if total_revenue and faiz_satiri_bulundu:
-                    faiz_orani = (faiz_geliri / total_revenue) * 100
-                    faiz_veri_var = True
-                    if faiz_orani <= 5: faiz_gecti = True
-
-                # 3. CASH & LIQUIDITY FILTER
-                nakit_orani, nakit_gecti, nakit_veri_var = None, False, False
-                for row in ['Cash And Cash Equivalents', 'Cash Cash Equivalents And Short Term Investments']:
-                    if row in bilanco_tablosu.index:
-                        ham_nakit = bilanco_tablosu.loc[row]
-                        val_n = ham_nakit.iloc[0] if hasattr(ham_nakit, 'iloc') else ham_nakit
-                        if not pd.isna(val_n) and val_n is not None:
-                            nakit_orani = (float(val_n) / py_f) * 100
-                            nakit_veri_var = True
-                            if nakit_orani <= 33: nakit_gecti = True
-                            break
-
-                # 4. RECEIVABLES FILTER
-                alacak_orani, alacak_gecti, alacak_veri_var = None, False, False
-                for row in ['Receivables', 'Accounts Receivable', 'Gross Accounts Receivable']:
-                    if row in bilanco_tablosu.index:
-                        ham_alacak = bilanco_tablosu.loc[row]
-                        val_a = ham_alacak.iloc[0] if hasattr(ham_alacak, 'iloc') else ham_alacak
-                        if not pd.isna(val_a) and val_a is not None:
-                            alacak_orani = (float(val_a) / py_f) * 100
-                            alacak_veri_var = True
-                            if alacak_orani <= 33: alacak_gecti = True
-                            break
-
-                # FINAL COMPLIANCE DECISION
-                veri_eksik = not (borc_veri_var and faiz_veri_var and nakit_veri_var and alacak_veri_var)
-                if veri_eksik: nihai_sonuc = "INSUFFICIENT DATA"
-                elif borc_gecti and faiz_gecti and nakit_gecti and alacak_gecti: nihai_sonuc = "COMPLIANT"
-                else: nihai_sonuc = "NON-COMPLIANT"
+                # Most recent quarter this balance sheet actually reports —
+                # shown so users know how fresh the underlying data is.
+                data_as_of = bilanco_tablosu.columns[0]
+                data_as_of_str = data_as_of.strftime("%Y-%m-%d") if hasattr(data_as_of, "strftime") else str(data_as_of)
 
                 toplu_sonuclar.append({
-                    "Ticker": g, "Avg Market Cap (1Y)": f"{py_f:,.0f}",
-                    "Debt Ratio (%33)": f"%{borc_orani:.2f}" if borc_veri_var else "N/A",
-                    "Interest Ratio (%5)": f"%{faiz_orani:.2f}" if faiz_veri_var else "N/A",
-                    "Cash Ratio (%33)": f"%{nakit_orani:.2f}" if nakit_veri_var else "N/A",
-                    "Receivables Ratio (%33)": f"%{alacak_orani:.2f}" if alacak_veri_var else "N/A",
-                    "FINAL STATUS": nihai_sonuc,
-                    "_b": borc_gecti if borc_veri_var else None, "_f": faiz_gecti if faiz_veri_var else None,
-                    "_n": nakit_gecti if nakit_veri_var else None, "_a": alacak_gecti if alacak_veri_var else None
+                    "Ticker": g,
+                    "Avg Market Cap (1Y)": f"{py_f:,.0f}",
+                    "Debt Ratio (%33)": format_ratio(result["debt_ratio"], result["debt_pass"], 33),
+                    "Interest Ratio (%5)": format_ratio(result["interest_ratio"], result["interest_pass"], 5),
+                    "Cash Ratio (%33)": format_ratio(result["cash_ratio"], result["cash_pass"], 33),
+                    "Receivables Ratio (%33)": format_ratio(result["receivables_ratio"], result["receivables_pass"], 33),
+                    "FINAL STATUS": result["status"],
+                    "Data As Of (Quarter)": data_as_of_str,
+                    "_b": result["debt_pass"] if result["debt_ratio"] is not None else None,
+                    "_f": result["interest_pass"] if result["interest_ratio"] is not None else None,
+                    "_n": result["cash_pass"] if result["cash_ratio"] is not None else None,
+                    "_a": result["receivables_pass"] if result["receivables_ratio"] is not None else None,
                 })
             except Exception as e:
                 st.warning(f"⚠️ Unexpected error while screening {g}: {e}")
@@ -185,11 +144,19 @@ if st.button("Run Screening"):
         if toplu_sonuclar:
             df_gosterim = pd.DataFrame(toplu_sonuclar).drop(columns=["_b", "_f", "_n", "_a"])
             st.dataframe(df_gosterim, use_container_width=True)
+            st.caption(
+                "Balance sheet and income statement figures are each company's most recently "
+                "reported quarter (see 'Data As Of' column). Market cap is the trailing "
+                "12-month average of raw daily closing prices, refreshed every 30 minutes."
+            )
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
                 df_gosterim.to_excel(writer, index=False, sheet_name='Quarterly Shariah Analysis')
                 worksheet = writer.sheets['Quarterly Shariah Analysis']
+
+                n_cols = len(df_gosterim.columns)
+                status_col = df_gosterim.columns.get_loc("FINAL STATUS") + 1
 
                 bg_baslik = PatternFill("solid", fgColor="1B4D3E")
                 bg_yesil = PatternFill("solid", fgColor="D4EDDA")
@@ -200,27 +167,38 @@ if st.button("Run Screening"):
                 f_kalin = Font(name="Arial", size=11, bold=True)
                 f_normal = Font(name="Arial", size=11)
 
-                for c_idx in range(1, 8):
+                for c_idx in range(1, n_cols + 1):
                     cell = worksheet.cell(row=1, column=c_idx)
                     cell.fill = bg_baslik
                     cell.font = f_beyaz
                     cell.alignment = Alignment(horizontal="center")
 
+                ratio_columns = {
+                    "Debt Ratio (%33)": "_b",
+                    "Interest Ratio (%5)": "_f",
+                    "Cash Ratio (%33)": "_n",
+                    "Receivables Ratio (%33)": "_a",
+                }
+
                 for idx, veri in enumerate(toplu_sonuclar):
                     r_idx = idx + 2
-                    for c_idx in range(1, 8):
+                    for c_idx in range(1, n_cols + 1):
                         worksheet.cell(row=r_idx, column=c_idx).font = f_normal
 
-                    worksheet.cell(row=r_idx, column=3).fill = bg_yesil if veri["_b"] else (bg_kirmizi if veri["_b"]==False else bg_gri)
-                    worksheet.cell(row=r_idx, column=4).fill = bg_yesil if veri["_f"] else (bg_kirmizi if veri["_f"]==False else bg_gri)
-                    worksheet.cell(row=r_idx, column=5).fill = bg_yesil if veri["_n"] else (bg_kirmizi if veri["_n"]==False else bg_gri)
-                    worksheet.cell(row=r_idx, column=6).fill = bg_yesil if veri["_a"] else (bg_kirmizi if veri["_a"]==False else bg_gri)
+                    for col_name, flag_key in ratio_columns.items():
+                        col_idx = df_gosterim.columns.get_loc(col_name) + 1
+                        flag = veri[flag_key]
+                        fill = bg_yesil if flag else (bg_kirmizi if flag == False else bg_gri)
+                        worksheet.cell(row=r_idx, column=col_idx).fill = fill
 
-                    c_durum = worksheet.cell(row=r_idx, column=7)
+                    c_durum = worksheet.cell(row=r_idx, column=status_col)
                     c_durum.font = f_kalin
-                    c_durum.fill = bg_yesil if veri["FINAL STATUS"] == "COMPLIANT" else (bg_kirmizi if veri["FINAL STATUS"] == "NON-COMPLIANT" else bg_gri)
+                    c_durum.fill = (
+                        bg_yesil if veri["FINAL STATUS"] == "COMPLIANT"
+                        else (bg_kirmizi if veri["FINAL STATUS"] == "NON-COMPLIANT" else bg_gri)
+                    )
 
-                for col_idx in range(1, 8):
+                for col_idx in range(1, n_cols + 1):
                     col_letter = get_column_letter(col_idx)
                     max_len = max(len(str(cell.value or '')) for cell in worksheet[col_letter])
                     worksheet.column_dimensions[col_letter].width = max(max_len + 4, 16)
