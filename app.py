@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as ticker_data
 import pandas as pd
 import io
+import time
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -58,21 +59,50 @@ statements, or religious fatwas. Please rely on official stock exchange announce
 for binding decisions.
 """)
 
+
 @st.cache_data(ttl=1800)
 def fetch_financial_data(ticker_symbol):
-    try:
-        company = ticker_data.Ticker(ticker_symbol)
-        return {
-            "balance_sheet": company.quarterly_balance_sheet,
-            "financials": company.quarterly_financials,
-            "history": company.history(period="1y", auto_adjust=False),
-            "info": company.info
-        }
-    except Exception:
-        return None
+    """
+    Fetch one ticker's data, retrying with exponential backoff (1s, 2s, 4s)
+    to ride out transient Yahoo Finance rate-limiting.
+
+    Raises the last exception on final failure instead of returning None.
+    This matters: st.cache_data only caches successful returns, never
+    raised exceptions — so a failed fetch is retried fresh next time
+    instead of being "stuck" as a cached failure for 30 minutes.
+    """
+    delay = 1
+    last_error = None
+    for attempt in range(3):
+        try:
+            company = ticker_data.Ticker(ticker_symbol)
+
+            # Prefer the lightweight fast_info for shares outstanding —
+            # falls back to the slower, more failure-prone .info only
+            # if fast_info doesn't have it.
+            shares_outstanding = None
+            try:
+                shares_outstanding = company.fast_info.get("shares")
+            except Exception:
+                shares_outstanding = None
+            if not shares_outstanding:
+                shares_outstanding = company.info.get('sharesOutstanding')
+
+            return {
+                "balance_sheet": company.quarterly_balance_sheet,
+                "financials": company.quarterly_financials,
+                "history": company.history(period="1y", auto_adjust=False),
+                "shares_outstanding": shares_outstanding,
+            }
+        except Exception as e:
+            last_error = e
+            if attempt < 2:
+                time.sleep(delay)
+                delay *= 2
+    raise last_error
 
 
-def format_ratio(value, passed, threshold_label):
+def format_ratio(value, passed):
     """Embed a ✓/✗ symbol alongside the percentage so the pass/fail
     signal doesn't rely on color alone (colorblind accessibility)."""
     if value is None:
@@ -96,17 +126,18 @@ if st.button("Run Screening"):
 
         for g in kodlar:
             ticker_symbol = f"{g}.IS" if not g.endswith(".IS") else g
+
             try:
                 data_pack = fetch_financial_data(ticker_symbol)
+            except Exception as e:
+                st.warning(f"⚠️ {ticker_symbol}: {type(e).__name__} — {e}. Skipped.")
+                continue
 
-                if not data_pack:
-                    st.warning(f"⚠️ Connection error for {ticker_symbol}. Skipped.")
-                    continue
-
+            try:
                 bilanco_tablosu = data_pack["balance_sheet"]
                 gelir_tablosu = data_pack["financials"]
                 gecmis_fiyatlar = data_pack["history"]
-                shares_outstanding = data_pack["info"].get('sharesOutstanding')
+                shares_outstanding = data_pack["shares_outstanding"]
 
                 if (bilanco_tablosu.empty or gelir_tablosu.empty or
                     gecmis_fiyatlar.empty or not shares_outstanding):
@@ -115,7 +146,7 @@ if st.button("Run Screening"):
 
                 py_f = float(gecmis_fiyatlar['Close'].mean() * shares_outstanding)
 
-                # All four ratios + final verdict now live in screening_logic.py,
+                # All four ratios + final verdict live in screening_logic.py,
                 # covered by test_filters.py — see that file before editing the math.
                 result = screen_company(bilanco_tablosu, gelir_tablosu, py_f)
 
@@ -127,10 +158,10 @@ if st.button("Run Screening"):
                 toplu_sonuclar.append({
                     "Ticker": g,
                     "Avg Market Cap (1Y)": f"{py_f:,.0f}",
-                    "Debt Ratio (%33)": format_ratio(result["debt_ratio"], result["debt_pass"], 33),
-                    "Interest Ratio (%5)": format_ratio(result["interest_ratio"], result["interest_pass"], 5),
-                    "Cash Ratio (%33)": format_ratio(result["cash_ratio"], result["cash_pass"], 33),
-                    "Receivables Ratio (%33)": format_ratio(result["receivables_ratio"], result["receivables_pass"], 33),
+                    "Debt Ratio (%33)": format_ratio(result["debt_ratio"], result["debt_pass"]),
+                    "Interest Ratio (%5)": format_ratio(result["interest_ratio"], result["interest_pass"]),
+                    "Cash Ratio (%33)": format_ratio(result["cash_ratio"], result["cash_pass"]),
+                    "Receivables Ratio (%33)": format_ratio(result["receivables_ratio"], result["receivables_pass"]),
                     "FINAL STATUS": result["status"],
                     "Data As Of (Quarter)": data_as_of_str,
                     "_b": result["debt_pass"] if result["debt_ratio"] is not None else None,
@@ -139,7 +170,7 @@ if st.button("Run Screening"):
                     "_a": result["receivables_pass"] if result["receivables_ratio"] is not None else None,
                 })
             except Exception as e:
-                st.warning(f"⚠️ Unexpected error while screening {g}: {e}")
+                st.warning(f"⚠️ Unexpected error while screening {g}: {type(e).__name__} — {e}")
 
         if toplu_sonuclar:
             df_gosterim = pd.DataFrame(toplu_sonuclar).drop(columns=["_b", "_f", "_n", "_a"])
